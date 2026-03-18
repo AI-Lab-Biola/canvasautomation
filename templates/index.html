@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Canvas Benchmark Runner</title>
+  <style>
+    /* ── Reset ───────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:            #07070f;
+      --surface:       rgba(255,255,255,0.035);
+      --surface-hi:    rgba(255,255,255,0.06);
+      --border:        rgba(255,255,255,0.07);
+      --border-active: rgba(99,102,241,0.45);
+      --text:          #f1f5f9;
+      --muted:         #64748b;
+      --accent:        #6366f1;
+      --accent2:       #8b5cf6;
+      --success:       #10b981;
+      --warning:       #f59e0b;
+      --error:         #ef4444;
+      --r:             16px;
+      --r-sm:          10px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Ambient glows */
+    body::before, body::after {
+      content: '';
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(140px);
+      pointer-events: none;
+      z-index: 0;
+      transition: opacity 1s;
+    }
+    body::before {
+      width: 700px; height: 700px;
+      background: radial-gradient(circle, rgba(99,102,241,0.10) 0%, transparent 70%);
+      top: -250px; left: -250px;
+    }
+    body::after {
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(139,92,246,0.08) 0%, transparent 70%);
+      bottom: -150px; right: -150px;
+    }
+
+    /* ── Layout ──────────────────────────────────── */
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 940px;
+      margin: 0 auto;
+      padding: 48px 20px 100px;
+    }
+
+    /* ── Header ──────────────────────────────────── */
+    header { text-align: center; margin-bottom: 52px; }
+
+    .logo-ring {
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      width: 60px; height: 60px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border-radius: 18px;
+      margin-bottom: 22px;
+      box-shadow: 0 0 0 1px rgba(99,102,241,0.3), 0 8px 40px rgba(99,102,241,0.35);
+    }
+    .logo-ring svg { width: 30px; height: 30px; }
+
+    header h1 {
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      background: linear-gradient(135deg, #f1f5f9 40%, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 8px;
+    }
+    header p { color: var(--muted); font-size: 15px; }
+
+    /* ── Card ────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 28px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      box-shadow: 0 4px 32px rgba(0,0,0,0.35);
+      margin-bottom: 20px;
+    }
+    .card-title {
+      font-size: 15px; font-weight: 700;
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 22px;
+    }
+    .card-title .ti {
+      width: 30px; height: 30px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; flex-shrink: 0;
+    }
+
+    /* ── Form ────────────────────────────────────── */
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+
+    .field label {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.9px;
+      text-transform: uppercase; color: var(--muted);
+    }
+
+    .field input {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 11px 14px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+    }
+    .field input:focus {
+      border-color: var(--border-active);
+      background: rgba(99,102,241,0.06);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+    }
+    .field input::placeholder { color: #334155; }
+    .field input.shake { animation: shake 0.35s ease; border-color: var(--error) !important; }
+
+    .field .hint { font-size: 11px; color: #334155; }
+
+    @keyframes shake {
+      0%,100% { transform: translateX(0); }
+      20%,60%  { transform: translateX(-5px); }
+      40%,80%  { transform: translateX(5px); }
+    }
+
+    /* ── Primary button ──────────────────────────── */
+    .btn {
+      width: 100%; padding: 14px 24px; margin-top: 8px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border: none; border-radius: var(--r-sm);
+      color: white; font-size: 15px; font-weight: 700;
+      font-family: inherit; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      box-shadow: 0 4px 24px rgba(99,102,241,0.4);
+      transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s;
+    }
+    .btn:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); box-shadow: 0 6px 32px rgba(99,102,241,0.5); }
+    .btn:active:not(:disabled) { transform: translateY(0); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Overall progress ────────────────────────── */
+    .progress-wrap { margin-bottom: 26px; }
+    .progress-row {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 10px;
+    }
+    .progress-label { font-size: 13px; font-weight: 600; }
+    .progress-pct   { font-size: 13px; font-weight: 700; color: var(--accent); }
+
+    .bar-track {
+      height: 8px; background: rgba(255,255,255,0.05);
+      border-radius: 99px; overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.7s cubic-bezier(0.4,0,0.2,1);
+      position: relative;
+    }
+    .bar-fill.shimmer::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.28), transparent);
+      animation: shimmer 1.6s infinite;
+    }
+    @keyframes shimmer { 0% { transform: translateX(-120%); } 100% { transform: translateX(120%); } }
+
+    /* ── Steps row ───────────────────────────────── */
+    .steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 24px; }
+
+    .step {
+      background: rgba(255,255,255,0.025);
+      border: 1px solid var(--border);
+      border-radius: 12px; padding: 13px 10px;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      text-align: center;
+      transition: border-color 0.3s, background 0.3s;
+    }
+    .step.active  { border-color: rgba(99,102,241,0.4);  background: rgba(99,102,241,0.07);  }
+    .step.done    { border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.05); }
+    .step.failed  { border-color: rgba(239,68,68,0.35);  background: rgba(239,68,68,0.05);  }
+
+    .step-icon {
+      width: 34px; height: 34px; border-radius: 9px; font-size: 16px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.05);
+      transition: background 0.3s;
+    }
+    .step.active .step-icon { background: rgba(99,102,241,0.18); }
+    .step.done   .step-icon { background: rgba(16,185,129,0.15); }
+    .step.failed .step-icon { background: rgba(239,68,68,0.14); }
+
+    .step-name   { font-size: 10px; font-weight: 700; letter-spacing: 0.4px; line-height: 1.2; }
+    .step-status {
+      font-size: 10px; color: var(--muted);
+      transition: color 0.3s;
+    }
+    .step.active .step-status { color: #818cf8; }
+    .step.done   .step-status { color: #34d399; }
+    .step.failed .step-status { color: #f87171; }
+
+    /* ── Active item ticker ──────────────────────── */
+    .ticker {
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(99,102,241,0.06);
+      border: 1px solid rgba(99,102,241,0.18);
+      border-radius: 10px; padding: 11px 14px;
+      margin-bottom: 22px; font-size: 13px;
+      animation: fadeUp 0.25s ease;
+    }
+    .ticker-name   { font-weight: 600; flex: 1; }
+    .ticker-action { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+
+    /* ── Dashboard panels ────────────────────────── */
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+    .scroll-list {
+      height: 300px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .scroll-list::-webkit-scrollbar { width: 3px; }
+    .scroll-list::-webkit-scrollbar-track { background: transparent; }
+    .scroll-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 99px; }
+
+    /* Assignment row */
+    .arow {
+      display: flex; align-items: center; gap: 9px;
+      padding: 9px 11px; border-radius: 8px;
+      background: rgba(255,255,255,0.025);
+      border: 1px solid transparent;
+      font-size: 12px;
+      animation: fadeUp 0.2s ease;
+      transition: border-color 0.3s, background 0.3s;
+    }
+    .arow.running { border-color: rgba(99,102,241,0.22); background: rgba(99,102,241,0.05); }
+    .arow.done    { border-color: rgba(16,185,129,0.18); background: rgba(16,185,129,0.03); }
+    .arow.failed  { border-color: rgba(239,68,68,0.18);  background: rgba(239,68,68,0.03);  }
+
+    .arow-icon {
+      width: 24px; height: 24px; border-radius: 6px; font-size: 12px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.05); flex-shrink: 0;
+    }
+    .arow.running .arow-icon { background: rgba(99,102,241,0.15); }
+    .arow.done    .arow-icon { background: rgba(16,185,129,0.12); }
+    .arow.failed  .arow-icon { background: rgba(239,68,68,0.12);  }
+
+    .arow-name {
+      flex: 1; font-weight: 500; color: #cbd5e1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .arow-badge {
+      font-size: 10px; font-weight: 700; padding: 2px 8px;
+      border-radius: 99px; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0;
+    }
+    .arow.running .arow-badge { background: rgba(99,102,241,0.18); color: #818cf8; }
+    .arow.done    .arow-badge { background: rgba(16,185,129,0.14); color: #34d399; }
+    .arow.failed  .arow-badge { background: rgba(239,68,68,0.14);  color: #f87171; }
+    .arow.pending .arow-badge { background: rgba(255,255,255,0.06); color: var(--muted); }
+
+    /* Log entries */
+    .log-row {
+      display: flex; gap: 8px; align-items: flex-start;
+      padding: 5px 7px; border-radius: 6px;
+      font-size: 11.5px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      animation: fadeUp 0.18s ease;
+    }
+    .log-ts  { color: #334155; flex-shrink: 0; }
+    .log-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+    .log-msg { color: #94a3b8; flex: 1; }
+
+    .log-row.success .log-dot              { background: var(--success); }
+    .log-row.success .log-msg              { color: #6ee7b7; }
+    .log-row.error   .log-dot              { background: var(--error); }
+    .log-row.error   .log-msg              { color: #fca5a5; }
+    .log-row.warning .log-dot              { background: var(--warning); }
+    .log-row.warning .log-msg              { color: #fcd34d; }
+    .log-row.info    .log-dot              { background: #1e293b; }
+
+    /* ── Complete banner ─────────────────────────── */
+    .done-banner {
+      display: flex; align-items: center; gap: 18px;
+      background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(6,78,59,0.08));
+      border: 1px solid rgba(16,185,129,0.22);
+      border-radius: var(--r); padding: 20px 24px;
+      margin-bottom: 20px;
+      animation: fadeUp 0.35s ease;
+    }
+    .done-icon {
+      width: 48px; height: 48px; background: rgba(16,185,129,0.13);
+      border-radius: 14px; display: flex; align-items: center;
+      justify-content: center; font-size: 22px; flex-shrink: 0;
+    }
+    .done-title { font-size: 17px; font-weight: 800; color: #34d399; }
+    .done-sub   { font-size: 13px; color: #6ee7b7; margin-top: 3px; }
+
+    /* ── Stats row ───────────────────────────────── */
+    .stats { display: flex; gap: 14px; margin-bottom: 24px; }
+    .stat {
+      flex: 1; background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px; text-align: center;
+    }
+    .stat-val {
+      font-size: 30px; font-weight: 800; display: block;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .stat-lbl {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.9px;
+      text-transform: uppercase; color: var(--muted); margin-top: 4px;
+    }
+
+    /* ── Results table ───────────────────────────── */
+    .tbl-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; font-size: 10px; font-weight: 700;
+      letter-spacing: 0.9px; text-transform: uppercase;
+      color: var(--muted); padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 11px 12px; font-size: 13px;
+      border-bottom: 1px solid rgba(255,255,255,0.035);
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.015); }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10px; font-weight: 700; padding: 3px 9px;
+      border-radius: 99px; letter-spacing: 0.4px;
+    }
+    .pill.ok  { background: rgba(16,185,129,0.13); color: #34d399; }
+    .pill.err { background: rgba(239,68,68,0.13);  color: #f87171; }
+    .pill.na  { background: rgba(255,255,255,0.06); color: var(--muted); }
+
+    .score-inline { display: flex; align-items: center; gap: 8px; min-width: 110px; }
+    .mini-bar { flex: 1; height: 4px; background: rgba(255,255,255,0.05); border-radius: 99px; overflow: hidden; }
+    .mini-fill { height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6); border-radius: 99px; }
+
+    /* ── Spinner ─────────────────────────────────── */
+    .spin {
+      width: 15px; height: 15px; flex-shrink: 0;
+      border: 2px solid rgba(99,102,241,0.25);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: rotate 0.75s linear infinite;
+    }
+    @keyframes rotate { to { transform: rotate(360deg); } }
+
+    /* ── Animations ──────────────────────────────── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeUp 0.3s ease forwards; }
+
+    /* ── Utility ─────────────────────────────────── */
+    .hidden { display: none !important; }
+
+    /* ── Responsive ──────────────────────────────── */
+    @media (max-width: 720px) {
+      .form-grid, .panels { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: repeat(3, 1fr); }
+      .stats { flex-wrap: wrap; }
+      .stat  { min-width: calc(50% - 7px); }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ── Header ──────────────────────────────────────────── -->
+  <header>
+    <div class="logo-ring">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+    </div>
+    <h1>Canvas Benchmark Runner</h1>
+    <p>Paste your API key — Claude handles the rest</p>
+  </header>
+
+  <!-- ── Setup card ──────────────────────────────────────── -->
+  <section id="sec-setup">
+    <div class="card">
+      <div class="card-title"><span class="ti">🔑</span> Connect to Canvas</div>
+      <div class="form-grid">
+        <div class="field">
+          <label>Canvas Domain</label>
+          <input id="inp-domain" type="text" placeholder="canvas.university.edu" autocomplete="off" />
+          <span class="hint">No https:// needed</span>
+        </div>
+        <div class="field">
+          <label>API Token</label>
+          <input id="inp-token" type="password" placeholder="Your Canvas access token" autocomplete="off" />
+          <span class="hint">Settings → Approved Integrations → New Token</span>
+        </div>
+        <div class="field full">
+          <label>Course IDs <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+          <input id="inp-courses" type="text" placeholder="all  — or comma-separated IDs like  12345, 67890" autocomplete="off" />
+          <span class="hint">Leave blank to run all active courses</span>
+        </div>
+      </div>
+      <button class="btn" id="start-btn" onclick="startRun()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Start Benchmark
+      </button>
+    </div>
+  </section>
+
+  <!-- ── Progress section (hidden initially) ────────────── -->
+  <section id="sec-progress" class="hidden">
+
+    <div class="card">
+      <!-- Overall bar -->
+      <div class="progress-wrap">
+        <div class="progress-row">
+          <span class="progress-label" id="phase-lbl">Initializing…</span>
+          <span class="progress-pct" id="phase-pct">0%</span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill shimmer" id="main-bar"></div>
+        </div>
+      </div>
+
+      <!-- Six steps -->
+      <div class="steps" id="steps-row">
+        <div class="step" id="st-fetch">
+          <div class="step-icon">📡</div>
+          <div class="step-name">Fetch<br>Courses</div>
+          <div class="step-status">Waiting</div>
+        </div>
+        <div class="step" id="st-context">
+          <div class="step-icon">📚</div>
+          <div class="step-name">Load<br>Contexts</div>
+          <div class="step-status">Waiting</div>
+        </div>
+        <div class="step" id="st-prompts">
+          <div class="step-icon">✍️</div>
+          <div class="step-name">Build<br>Prompts</div>
+          <div class="step-status">Waiting</div>
+        </div>
+        <div class="step" id="st-llm">
+          <div class="step-icon">🤖</div>
+          <div class="step-name">Generate<br>Responses</div>
+          <div class="step-status">Waiting</div>
+        </div>
+        <div class="step" id="st-submit">
+          <div class="step-icon">📤</div>
+          <div class="step-name">Submit<br>Work</div>
+          <div class="step-status">Waiting</div>
+        </div>
+        <div class="step" id="st-grades">
+          <div class="step-icon">🎯</div>
+          <div class="step-name">Collect<br>Grades</div>
+          <div class="step-status">Waiting</div>
+        </div>
+      </div>
+
+      <!-- Current item -->
+      <div class="ticker hidden" id="ticker">
+        <div class="spin"></div>
+        <span class="ticker-name" id="ticker-name">—</span>
+        <span class="ticker-action" id="ticker-action">—</span>
+      </div>
+    </div>
+
+    <!-- Side-by-side panels -->
+    <div class="panels">
+      <div class="card" style="margin-bottom:0">
+        <div class="card-title"><span class="ti">📝</span> Assignments &amp; Quizzes</div>
+        <div class="scroll-list" id="asgn-list"></div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <div class="card-title"><span class="ti">⚡</span> Live Activity</div>
+        <div class="scroll-list" id="log-feed"></div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ── Results section (hidden initially) ──────────────── -->
+  <section id="sec-results" class="hidden" style="margin-top:20px">
+    <div class="done-banner" id="done-banner">
+      <div class="done-icon">✅</div>
+      <div>
+        <div class="done-title">Benchmark Complete</div>
+        <div class="done-sub" id="done-sub">—</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="ti">📊</span> Results</div>
+
+      <div class="stats">
+        <div class="stat"><span class="stat-val" id="s-total">—</span><div class="stat-lbl">Total Items</div></div>
+        <div class="stat"><span class="stat-val" id="s-submitted">—</span><div class="stat-lbl">Submitted</div></div>
+        <div class="stat"><span class="stat-val" id="s-errors">—</span><div class="stat-lbl">Errors</div></div>
+        <div class="stat"><span class="stat-val" id="s-score">—</span><div class="stat-lbl">Avg Score</div></div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Assignment</th>
+              <th>Type</th>
+              <th>Course</th>
+              <th>Status</th>
+              <th>Score</th>
+              <th>Tokens</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /wrap -->
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+let evtSrc   = null;
+let runId    = null;
+let itemMap  = {};  // name -> DOM element
+
+const PHASE_TO_STEP = {
+  fetch:   'st-fetch',
+  context: 'st-context',
+  prompts: 'st-prompts',
+  llm:     'st-llm',
+  submit:  'st-submit',
+  grades:  'st-grades',
+};
+
+const PHASE_ORDER = ['fetch','context','prompts','llm','submit','grades'];
+
+const PHASE_LABELS = {
+  fetch:   'Fetching Courses',
+  context: 'Loading Course Contexts',
+  prompts: 'Building Prompts',
+  llm:     'Generating AI Responses',
+  submit:  'Submitting Work',
+  grades:  'Collecting Grades & Exporting',
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const show = id => $( id )?.classList.remove('hidden');
+const hide = id => $( id )?.classList.add('hidden');
+const esc = s  => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function setBar(pct, label) {
+  const bar = $('main-bar');
+  if (bar) bar.style.width = Math.min(pct, 100) + '%';
+  if (label) $('phase-lbl').textContent = label;
+  $('phase-pct').textContent = Math.min(pct, 100) + '%';
+}
+
+function setStep(stepId, state, status) {
+  const el = $(stepId);
+  if (!el) return;
+  el.className = `step${state ? ' ' + state : ''}`;
+  const s = el.querySelector('.step-status');
+  if (s && status) s.textContent = status;
+}
+
+function pushLog(ts, msg, level='info') {
+  const feed = $('log-feed');
+  if (!feed) return;
+  const row = document.createElement('div');
+  row.className = `log-row ${level}`;
+  row.innerHTML = `<span class="log-ts">${ts}</span><span class="log-dot"></span><span class="log-msg">${esc(msg)}</span>`;
+  feed.appendChild(row);
+  feed.scrollTop = feed.scrollHeight;
+  while (feed.children.length > 300) feed.removeChild(feed.firstChild);
+}
+
+function upsertItem(name, kind, state, badge) {
+  const list = $('asgn-list');
+  if (!list) return;
+  let row = itemMap[name];
+  const icon = kind === 'quiz' ? '📋' : '📝';
+  if (!row) {
+    row = document.createElement('div');
+    row.className = `arow ${state}`;
+    row.innerHTML = `
+      <div class="arow-icon">${icon}</div>
+      <div class="arow-name" title="${esc(name)}">${esc(name)}</div>
+      <div class="arow-badge">${badge}</div>`;
+    list.appendChild(row);
+    itemMap[name] = row;
+  } else {
+    row.className = `arow ${state}`;
+    const b = row.querySelector('.arow-badge');
+    if (b) b.textContent = badge;
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+function showTicker(name, action) {
+  show('ticker');
+  $('ticker-name').textContent = name;
+  $('ticker-action').textContent = action;
+}
+
+// ── SSE event dispatcher ───────────────────────────────────────────────────
+function handle(data) {
+  switch (data.type) {
+
+    case 'connected':
+      pushLog(data.ts || '—', 'Connected — benchmark starting…', 'info');
+      break;
+
+    case 'phase': {
+      const idx   = PHASE_ORDER.indexOf(data.phase);
+      const phasePct = Math.round((data.current / data.total) * 100);
+      setBar(phasePct, PHASE_LABELS[data.phase] || data.label);
+      // Mark prior phases done
+      PHASE_ORDER.slice(0, idx).forEach(p => setStep(PHASE_TO_STEP[p], 'done', 'Done ✓'));
+      // Mark current active
+      if (PHASE_TO_STEP[data.phase]) setStep(PHASE_TO_STEP[data.phase], 'active', 'Running…');
+      break;
+    }
+
+    case 'courses':
+      pushLog(data.ts||'—', `Found ${data.courses?.length||0} course(s)`, 'success');
+      break;
+
+    case 'items_total':
+      pushLog(data.ts||'—', `${data.assignments} assignments + ${data.quizzes} quizzes = ${data.total} total`, 'info');
+      break;
+
+    case 'item_start': {
+      const labels = { prompt: 'Prompt', llm: 'Claude', submit: 'Submitting' };
+      const badge  = labels[data.action] || data.action;
+      showTicker(data.name, badge);
+      upsertItem(data.name, data.kind, 'running', badge);
+      break;
+    }
+
+    case 'item_done': {
+      const ok = data.success;
+      upsertItem(data.name, data.kind||'assignment', ok ? 'done' : 'failed', ok ? '✓ Done' : '✗ Error');
+      if (!ok && data.error) pushLog(data.ts||'—', `Error: ${data.error}`, 'error');
+      break;
+    }
+
+    case 'progress': {
+      // Interpolate within submit phase (50–90 range)
+      const p = 50 + Math.round((data.percent || 0) * 0.40);
+      setBar(p);
+      break;
+    }
+
+    case 'log':
+      pushLog(data.ts||'—', data.message, data.level||'info');
+      break;
+
+    case 'error':
+      pushLog(data.ts||'—', `ERROR: ${data.message}`, 'error');
+      Object.values(PHASE_TO_STEP).forEach(sid => {
+        const el = $(sid);
+        if (el?.classList.contains('active')) setStep(sid, 'failed', 'Failed');
+      });
+      enableBtn();
+      break;
+
+    case 'results':
+      buildTable(data.items || []);
+      break;
+
+    case 'complete':
+      onComplete(data);
+      break;
+
+    case 'stream_end':
+      if (evtSrc) { evtSrc.close(); evtSrc = null; }
+      break;
+  }
+}
+
+// ── Completion ─────────────────────────────────────────────────────────────
+function onComplete(data) {
+  const bar = $('main-bar');
+  if (bar) { bar.style.width = '100%'; bar.classList.remove('shimmer'); }
+  setBar(100, 'Complete');
+  hide('ticker');
+
+  PHASE_ORDER.forEach(p => {
+    const el = $(PHASE_TO_STEP[p]);
+    if (!el?.classList.contains('failed')) setStep(PHASE_TO_STEP[p], 'done', 'Done ✓');
+  });
+
+  if (data.success) {
+    const s = data.summary || {};
+    $('done-sub').textContent =
+      `${s.submitted || 0} of ${s.total || 0} items submitted — run ${s.run_id || '—'}`;
+    $('s-total').textContent     = s.total     ?? '—';
+    $('s-submitted').textContent = s.submitted ?? '—';
+    $('s-errors').textContent    = s.errors    ?? '0';
+    show('sec-results');
+    $('sec-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  enableBtn();
+}
+
+// ── Results table ──────────────────────────────────────────────────────────
+function buildTable(items) {
+  const tbody = $('results-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  let total = 0, count = 0;
+
+  items.forEach(item => {
+    const hasScore = item.score != null && item.max_points;
+    const pct      = hasScore ? Math.round(item.score / item.max_points * 100) : null;
+    if (pct != null) { total += pct; count++; }
+
+    const statusPill = item.error
+      ? `<span class="pill err">✗ Error</span>`
+      : `<span class="pill ok">✓ Done</span>`;
+
+    const scoreCell = hasScore
+      ? `<div class="score-inline">
+           <div class="mini-bar"><div class="mini-fill" style="width:${pct}%"></div></div>
+           <span style="white-space:nowrap">${item.score}/${item.max_points}</span>
+         </div>`
+      : `<span style="color:var(--muted)">—</span>`;
+
+    const tokens = (item.prompt_tokens||0) + (item.completion_tokens||0);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${esc(item.assignment_name || item.assignment_id || '—')}</td>
+      <td style="color:var(--muted)">${esc(item.assignment_type || '—')}</td>
+      <td style="color:var(--muted)">${esc(item.course_name || '—')}</td>
+      <td>${statusPill}</td>
+      <td>${scoreCell}</td>
+      <td style="color:var(--muted)">${tokens || '—'}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  if (count > 0) {
+    $('s-score').textContent = Math.round(total / count) + '%';
+  }
+}
+
+// ── Start benchmark ────────────────────────────────────────────────────────
+async function startRun() {
+  const domain    = $('inp-domain')?.value.trim();
+  const token     = $('inp-token')?.value.trim();
+  const courseIds = $('inp-courses')?.value.trim() || 'all';
+
+  if (!domain) { shake('inp-domain'); return; }
+  if (!token)  { shake('inp-token');  return; }
+
+  // Reset state
+  itemMap = {};
+  $('asgn-list').innerHTML  = '';
+  $('log-feed').innerHTML   = '';
+  if ($('results-body')) $('results-body').innerHTML = '';
+  ['s-total','s-submitted','s-errors','s-score'].forEach(id => $(id).textContent = '—');
+  PHASE_ORDER.forEach(p => setStep(PHASE_TO_STEP[p], '', 'Waiting'));
+  setBar(0, 'Initializing…');
+  hide('sec-results');
+
+  // Disable button
+  const btn = $('start-btn');
+  btn.disabled = true;
+  btn.innerHTML = `<div class="spin"></div> Starting…`;
+
+  show('sec-progress');
+  $('sec-progress').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  try {
+    const res  = await fetch('/api/start', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ canvas_domain: domain, canvas_token: token, course_ids: courseIds }),
+    });
+    const data = await res.json();
+
+    if (!res.ok || data.error) {
+      pushLog('—', `Failed to start: ${data.error || 'Unknown error'}`, 'error');
+      enableBtn(); return;
+    }
+
+    runId = data.run_id;
+
+    if (evtSrc) evtSrc.close();
+    evtSrc = new EventSource(`/api/stream/${runId}`);
+    evtSrc.onmessage = e => {
+      try { handle(JSON.parse(e.data)); } catch {}
+    };
+    evtSrc.onerror = () => pushLog('—', 'Connection lost — refresh if this persists', 'warning');
+
+  } catch (err) {
+    pushLog('—', `Network error: ${err.message}`, 'error');
+    enableBtn();
+  }
+}
+
+function enableBtn() {
+  const btn = $('start-btn');
+  btn.disabled = false;
+  btn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Again`;
+}
+
+function shake(id) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.add('shake');
+  el.focus();
+  setTimeout(() => el.classList.remove('shake'), 500);
+}
+
+// Enter key on any input triggers start
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement?.tagName === 'INPUT' && !$('start-btn')?.disabled) {
+    startRun();
+  }
+});
+</script>
+</body>
+</html>

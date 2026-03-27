@@ -1,7 +1,7 @@
 """
 fetch_assignments.py — Fetch all assignments and their rubrics for a course.
 
-Skips assignments that are locked or already submitted.
+Skips assignments that are locked. Already-submitted assignments are included to allow resubmission.
 Writes: .tmp/assignments_<course_id>.json
 
 Usage: python tools/fetch_assignments.py --course-id 12345
@@ -40,12 +40,6 @@ def fetch_assignments(course_id):
     for a in raw:
         # Skip locked assignments
         if a.get("locked_for_user") or a.get("lock_at") and a.get("is_locked"):
-            skipped += 1
-            continue
-
-        # Skip if already submitted (has a submission with submitted_at)
-        submission = a.get("submission") or {}
-        if submission.get("submitted_at") and submission.get("workflow_state") not in ("unsubmitted",):
             skipped += 1
             continue
 

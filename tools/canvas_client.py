@@ -48,6 +48,7 @@ class CanvasClient:
             time.sleep(2)
 
     def _request(self, method, path, retries=3, **kwargs):
+        kwargs.setdefault("timeout", 60)
         url = f"{self.base_url}{path}" if path.startswith("/") else path
         for attempt in range(retries):
             self._throttle()

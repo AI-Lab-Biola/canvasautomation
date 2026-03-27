@@ -118,7 +118,7 @@ def api_stream(run_id: str):
 
 # ── Tool runner ───────────────────────────────────────────────────────────────
 
-def _run_tool(state: RunState, script: str, args: list, env: dict) -> tuple[bool, str, str]:
+def _run_tool(state: RunState, script: str, args: list, env: dict, timeout: int = 300) -> tuple[bool, str, str]:
     """Run a Python tool script. Returns (success, stdout, stderr)."""
     cmd = ["python3", str(BASE_DIR / "tools" / script)] + [str(a) for a in args]
     try:
@@ -128,7 +128,7 @@ def _run_tool(state: RunState, script: str, args: list, env: dict) -> tuple[bool
             text=True,
             env=env,
             cwd=str(BASE_DIR),
-            timeout=300,
+            timeout=timeout,
         )
         return result.returncode == 0, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
@@ -151,7 +151,7 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
     tmp_dir = BASE_DIR / ".tmp"
     tmp_dir.mkdir(exist_ok=True)
 
-    PHASES = ["fetch", "context", "prompts", "llm", "submit", "grades"]
+    PHASES = ["fetch", "context", "classify", "prompts", "llm", "excel", "submit", "grades"]
     total_phases = len(PHASES)
 
     def phase(name: str, current: int):
@@ -247,55 +247,137 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
             state.status = "complete"
             return
 
-        # ── 3. Build prompts ──────────────────────────────────────────────────
-        phase("prompts", 2)
+        # ── 3. Classify assignments ───────────────────────────────────────────
+        phase("classify", 2)
+        from tools.classify_assignment import classify, SKIP, NEEDS_HUMAN, AUTOMATABLE_EXCEL, AUTOMATABLE_TEXT
 
         for item in all_assignments:
+            cat, reason = classify(item)
+            item["_category"] = cat
+            name = item.get("name", f"Assignment {item['id']}")
+            if cat == SKIP:
+                state.log(f"Skipping (external platform): {name}", "warning")
+                state.send("item_skipped", kind="assignment", name=name, reason=reason)
+            elif cat == NEEDS_HUMAN:
+                state.log(f"Needs human action: {name}", "warning")
+                state.send("item_needs_human", kind="assignment", name=name, reason=reason)
+            elif cat == AUTOMATABLE_EXCEL:
+                state.log(f"Excel assignment: {name}")
+            else:
+                state.log(f"Text assignment: {name}")
+
+        # Count only actionable items
+        actionable = [a for a in all_assignments if a["_category"] not in (SKIP, NEEDS_HUMAN)]
+        actionable_quizzes = all_quizzes  # quizzes are always actionable
+        total_actionable = len(actionable) + len(actionable_quizzes)
+
+        skipped    = len([a for a in all_assignments if a["_category"] == SKIP])
+        need_human = len([a for a in all_assignments if a["_category"] == NEEDS_HUMAN])
+
+        state.log(
+            f"Classification: {len(actionable)} automatable, "
+            f"{skipped} skipped (external), "
+            f"{need_human} need human action",
+            "success"
+        )
+        state.send("items_total",
+                   assignments=len(actionable),
+                   quizzes=len(actionable_quizzes),
+                   total=total_actionable)
+        phase("classify", 3)
+
+        if total_actionable == 0:
+            state.send("complete", success=True,
+                       summary={"total": 0, "submitted": 0, "errors": 0, "run_id": run_id})
+            state.status = "complete"
+            return
+
+        # ── 4. Fetch datasets + build prompts ─────────────────────────────────
+        phase("prompts", 3)
+
+        for item in actionable:
             name = item.get("name", f"Assignment {item['id']}")
             state.send("item_start", kind="assignment", name=name, action="prompt")
             state.log(f"Building prompt: {name}")
-            ok, _, err = _run_tool(state, "build_prompt.py", [
-                "--course-id", item["_course_id"],
-                "--assignment-id", item["id"],
-                "--run-id", run_id,
-            ], env)
+
+            if item["_category"] == AUTOMATABLE_EXCEL:
+                # Fetch / synthesize dataset first
+                ok, _, err = _run_tool(state, "fetch_attachments.py", [
+                    "--course-id",     item["_course_id"],
+                    "--assignment-id", item["id"],
+                ], env)
+                if not ok:
+                    state.log(f"Dataset fetch note for {name}: {err[:120]}", "warning")
+
+                # Find dataset path
+                dataset_dir = BASE_DIR / f".tmp/attachments_{item['_course_id']}_{item['id']}"
+                dataset_path = ""
+                if dataset_dir.exists():
+                    files = [f for f in dataset_dir.iterdir() if not f.name.startswith(".")]
+                    if files:
+                        dataset_path = str(files[0])
+
+                ok, _, err = _run_tool(state, "build_prompt.py", [
+                    "--course-id",     item["_course_id"],
+                    "--assignment-id", item["id"],
+                    "--run-id",        run_id,
+                    "--excel",
+                    *(["--dataset-path", dataset_path] if dataset_path else []),
+                ], env)
+            else:
+                ok, _, err = _run_tool(state, "build_prompt.py", [
+                    "--course-id",     item["_course_id"],
+                    "--assignment-id", item["id"],
+                    "--run-id",        run_id,
+                ], env)
+
             item["_prompt_ok"] = ok
             if not ok:
                 state.log(f"Prompt build failed for {name}: {err[:120]}", "warning")
 
-        for item in all_quizzes:
+        for item in actionable_quizzes:
             name = item.get("title", f"Quiz {item['id']}")
             state.send("item_start", kind="quiz", name=name, action="prompt")
             state.log(f"Building prompt: {name}")
             ok, _, err = _run_tool(state, "build_prompt.py", [
                 "--course-id", item["_course_id"],
-                "--quiz-id", item["id"],
-                "--run-id", run_id,
+                "--quiz-id",   item["id"],
+                "--run-id",    run_id,
             ], env)
             item["_prompt_ok"] = ok
             if not ok:
                 state.log(f"Prompt build failed for {name}: {err[:120]}", "warning")
 
-        phase("prompts", 3)
+        phase("prompts", 4)
 
-        # ── 4. Run LLM ────────────────────────────────────────────────────────
-        phase("llm", 3)
+        # ── 5. Run LLM ────────────────────────────────────────────────────────
+        phase("llm", 4)
 
-        for item in all_assignments:
+        for item in actionable:
             if not item.get("_prompt_ok"):
                 item["_llm_ok"] = False
                 continue
             name = item.get("name", f"Assignment {item['id']}")
             state.send("item_start", kind="assignment", name=name, action="llm")
             state.log(f"Generating response: {name}")
-            ok, _, err = _run_tool(state, "run_llm.py", [
-                "--assignment-id", item["id"], "--run-id", run_id,
-            ], env)
+
+            if item["_category"] == AUTOMATABLE_EXCEL:
+                ok, _, err = _run_tool(state, "run_llm.py", [
+                    "--assignment-id", item["id"],
+                    "--run-id",        run_id,
+                    "--excel",
+                ], env)
+            else:
+                ok, _, err = _run_tool(state, "run_llm.py", [
+                    "--assignment-id", item["id"],
+                    "--run-id",        run_id,
+                ], env)
+
             item["_llm_ok"] = ok
             if not ok:
                 state.log(f"LLM failed for {name}: {err[:120]}", "warning")
 
-        for item in all_quizzes:
+        for item in actionable_quizzes:
             if not item.get("_prompt_ok"):
                 item["_llm_ok"] = False
                 continue
@@ -309,16 +391,51 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
             if not ok:
                 state.log(f"LLM failed for {name}: {err[:120]}", "warning")
 
-        phase("llm", 4)
+        phase("llm", 5)
 
-        # ── 5. Submit ─────────────────────────────────────────────────────────
-        phase("submit", 4)
+        # ── 6. Generate Excel workbooks ───────────────────────────────────────
+        phase("excel", 5)
+
+        excel_assignments = [a for a in actionable if a["_category"] == AUTOMATABLE_EXCEL]
+        if excel_assignments:
+            state.log(f"Generating {len(excel_assignments)} Excel workbook(s)…")
+
+        for item in excel_assignments:
+            name = item.get("name", f"Assignment {item['id']}")
+            if not item.get("_llm_ok"):
+                item["_excel_ok"] = False
+                continue
+            state.send("item_start", kind="assignment", name=name, action="excel")
+            state.log(f"Building Excel workbook: {name}")
+
+            dataset_dir = BASE_DIR / f".tmp/attachments_{item['_course_id']}_{item['id']}"
+            dataset_path = ""
+            if dataset_dir.exists():
+                files = [f for f in dataset_dir.iterdir() if not f.name.startswith(".")]
+                if files:
+                    dataset_path = str(files[0])
+
+            ok, _, err = _run_tool(state, "generate_excel.py", [
+                "--assignment-id", item["id"],
+                "--run-id",        run_id,
+                *(["--dataset-path", dataset_path] if dataset_path else []),
+            ], env)
+            item["_excel_ok"] = ok
+            if ok:
+                state.log(f"Excel workbook ready: {name}", "success")
+            else:
+                state.log(f"Excel generation failed for {name}: {err[:120]}", "warning")
+
+        phase("excel", 6)
+
+        # ── 7. Submit ─────────────────────────────────────────────────────────
+        phase("submit", 6)
 
         submitted  = 0
         errors     = 0
         completed  = 0
 
-        for item in all_assignments:
+        for item in actionable:
             name = item.get("name", f"Assignment {item['id']}")
             if not item.get("_llm_ok"):
                 errors += 1
@@ -326,7 +443,7 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                            error="LLM response unavailable")
                 completed += 1
                 state.send("progress", current=completed, total=total_items,
-                           percent=int(completed / total_items * 100))
+                           percent=int(completed / max(total_actionable, 1) * 100))
                 continue
 
             state.send("item_start", kind="assignment", name=name, action="submit")
@@ -335,7 +452,7 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                 "--course-id", item["_course_id"],
                 "--assignment-id", item["id"],
                 "--run-id", run_id,
-            ], env)
+            ], env, timeout=600)
 
             completed += 1
             if ok:
@@ -349,17 +466,17 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                 state.log(f"Submit failed — {name}: {err[:100]}", "error")
 
             state.send("progress", current=completed, total=total_items,
-                       percent=int(completed / total_items * 100))
+                       percent=int(completed / max(total_actionable, 1) * 100))
 
-        for item in all_quizzes:
+        for item in actionable_quizzes:
             name = item.get("title", f"Quiz {item['id']}")
             if not item.get("_llm_ok"):
                 errors += 1
                 state.send("item_done", kind="quiz", name=name, success=False,
                            error="LLM response unavailable")
                 completed += 1
-                state.send("progress", current=completed, total=total_items,
-                           percent=int(completed / total_items * 100))
+                state.send("progress", current=completed, total=total_actionable,
+                           percent=int(completed / total_actionable * 100))
                 continue
 
             state.send("item_start", kind="quiz", name=name, action="submit")
@@ -368,7 +485,7 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                 "--course-id", item["_course_id"],
                 "--quiz-id", item["id"],
                 "--run-id", run_id,
-            ], env)
+            ], env, timeout=600)
 
             completed += 1
             if ok:
@@ -381,13 +498,13 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                            success=False, error=err[:200])
                 state.log(f"Quiz submit failed — {name}: {err[:100]}", "error")
 
-            state.send("progress", current=completed, total=total_items,
-                       percent=int(completed / total_items * 100))
+            state.send("progress", current=completed, total=total_actionable,
+                       percent=int(completed / total_actionable * 100))
 
-        phase("submit", 5)
+        phase("submit", 7)
 
-        # ── 6. Grades & export ────────────────────────────────────────────────
-        phase("grades", 5)
+        # ── 8. Grades & export ────────────────────────────────────────────────
+        phase("grades", 7)
         state.log("Fetching auto-graded results…")
 
         ok, _, err = _run_tool(state, "fetch_grades.py", ["--run-id", run_id, "--once"], env)
@@ -413,10 +530,10 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
                         except json.JSONDecodeError:
                             pass
 
-        phase("grades", 6)
+        phase("grades", 8)
         state.send("results", items=result_items)
         state.send("complete", success=True, summary={
-            "total":     total_items,
+            "total":     total_actionable,
             "submitted": submitted,
             "errors":    errors,
             "run_id":    run_id,
@@ -439,5 +556,5 @@ def _run_benchmark(state: RunState, canvas_domain: str, canvas_token: str, cours
 if __name__ == "__main__":
     print("\n  Canvas Benchmark Runner")
     print("  ─────────────────────────────────────")
-    print("  http://localhost:8080\n")
-    app.run(debug=False, host="0.0.0.0", port=8080, threaded=True)
+    print("  http://localhost:5050\n")
+    app.run(debug=False, host="0.0.0.0", port=5050, threaded=True)

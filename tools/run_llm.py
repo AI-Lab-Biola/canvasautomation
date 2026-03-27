@@ -69,6 +69,75 @@ def run_llm(prompt_data, dry_run=False):
     return result
 
 
+def parse_excel_response(response_text: str) -> tuple[str, str]:
+    """
+    Split LLM response into (excel_code, reflection_text).
+    Handles:
+      - Complete response with ``` fences and ---REFLECTION---
+      - Truncated response (max_tokens hit) — extracts code up to cut-off point
+    """
+    reflection_text = ""
+
+    # Split off reflection first if present
+    if "---REFLECTION---" in response_text:
+        code_part, reflection_text = response_text.split("---REFLECTION---", 1)
+        reflection_text = reflection_text.strip()
+    else:
+        code_part = response_text
+
+    # Try to extract fenced code block
+    code_match = re.search(r"```(?:python)?\s*\n(.*?)```", code_part, re.DOTALL)
+    if code_match:
+        excel_code = code_match.group(1).strip()
+    else:
+        # Response was truncated — take everything from opening fence to end
+        open_match = re.search(r"```(?:python)?\s*\n(.*)", code_part, re.DOTALL)
+        if open_match:
+            excel_code = open_match.group(1).strip()
+        else:
+            excel_code = code_part.strip()
+
+    return excel_code, reflection_text
+
+
+def run_for_excel_assignment(assignment_id, run_id, dry_run=False):
+    """Run LLM for an Excel assignment — parses code + reflection from the response."""
+    prompt_path = f".tmp/prompts_{run_id}/{assignment_id}.json"
+    if not os.path.exists(prompt_path):
+        raise FileNotFoundError(f"Prompt not found: {prompt_path}")
+
+    with open(prompt_path) as f:
+        prompt_data = json.load(f)
+
+    # Excel assignments need more output tokens for code + reflection
+    original_max = os.environ.get("BENCHMARK_MAX_TOKENS")
+    os.environ["BENCHMARK_MAX_TOKENS"] = "8192"
+    try:
+        result = run_llm(prompt_data, dry_run=dry_run)
+    finally:
+        if original_max is None:
+            os.environ.pop("BENCHMARK_MAX_TOKENS", None)
+        else:
+            os.environ["BENCHMARK_MAX_TOKENS"] = original_max
+    result["assignment_id"] = assignment_id
+    result["run_id"]        = run_id
+
+    # Parse code and reflection from response
+    excel_code, reflection_text = parse_excel_response(result["text"])
+    result["excel_code"]      = excel_code
+    result["reflection_text"] = reflection_text
+
+    out_dir  = f".tmp/responses_{run_id}"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = f"{out_dir}/{assignment_id}.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[run_llm] Excel response saved → {out_path}")
+    print(f"  Code: {len(excel_code)} chars | Reflection: {len(reflection_text)} chars")
+    return result
+
+
 def run_for_assignment(assignment_id, run_id, dry_run=False):
     prompt_path = f".tmp/prompts_{run_id}/{assignment_id}.json"
     if not os.path.exists(prompt_path):
@@ -155,12 +224,15 @@ def parse_quiz_answers(response_text, questions):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LLM on a built prompt")
     parser.add_argument("--assignment-id", type=int)
-    parser.add_argument("--quiz-id", type=int)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--dry-run", action="store_true", help="Preview prompt without calling API")
+    parser.add_argument("--quiz-id",       type=int)
+    parser.add_argument("--run-id",        required=True)
+    parser.add_argument("--excel",         action="store_true", help="Parse response as excel_code + reflection")
+    parser.add_argument("--dry-run",       action="store_true", help="Preview prompt without calling API")
     args = parser.parse_args()
 
-    if args.assignment_id:
+    if args.assignment_id and args.excel:
+        run_for_excel_assignment(args.assignment_id, args.run_id, dry_run=args.dry_run)
+    elif args.assignment_id:
         run_for_assignment(args.assignment_id, args.run_id, dry_run=args.dry_run)
     elif args.quiz_id:
         run_for_quiz(args.quiz_id, args.run_id, dry_run=args.dry_run)

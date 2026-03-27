@@ -62,7 +62,13 @@ def submit_assignment(course_id, assignment_id, run_id):
             result = _submit_discussion(client, course_id, assignment, response_text)
 
         elif submission_type == "online_upload":
-            result = _submit_upload(client, course_id, assignment_id, response_text, run_id)
+            # Check if an Excel file was generated for this assignment
+            excel_path = f".tmp/responses_{run_id}/{assignment_id}.xlsx"
+            reflection_text = llm_response.get("reflection_text", "")
+            if os.path.exists(excel_path):
+                result = _submit_excel(client, course_id, assignment_id, excel_path, reflection_text, run_id)
+            else:
+                result = _submit_upload(client, course_id, assignment_id, response_text, run_id)
 
         else:
             raise NotImplementedError(f"Submission type '{submission_type}' not supported")
@@ -158,6 +164,31 @@ def _submit_upload(client, course_id, assignment_id, text, run_id):
             "submission": {
                 "submission_type": "online_upload",
                 "file_ids": [file_id],
+            }
+        },
+    )
+
+
+def _submit_excel(client, course_id, assignment_id, excel_path, reflection_text, run_id):
+    """Upload the .xlsx workbook (and optionally a reflection .txt) then submit both file IDs."""
+    file_ids = []
+
+    # Upload the Excel workbook
+    excel_id = upload_file(client, course_id, assignment_id, excel_path)
+    file_ids.append(excel_id)
+
+    # If there's a reflection, save and upload it too
+    if reflection_text.strip():
+        reflection_path = save_response_as_file(reflection_text, f"{assignment_id}_reflection", run_id)
+        reflection_id = upload_file(client, course_id, assignment_id, reflection_path)
+        file_ids.append(reflection_id)
+
+    return client.post(
+        f"/courses/{course_id}/assignments/{assignment_id}/submissions",
+        json={
+            "submission": {
+                "submission_type": "online_upload",
+                "file_ids": file_ids,
             }
         },
     )

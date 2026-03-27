@@ -11,6 +11,7 @@ Token budget (approximate):
 Writes: .tmp/prompts_<run_id>/<assignment_id>.json
 Usage:
   python tools/build_prompt.py --course-id 12345 --assignment-id 67890 --run-id <run_id>
+  python tools/build_prompt.py --course-id 12345 --assignment-id 67890 --run-id <run_id> --excel --dataset-path .tmp/attachments_.../file.csv
   python tools/build_prompt.py --course-id 12345 --quiz-id 11111 --run-id <run_id>
 """
 
@@ -26,10 +27,17 @@ CHARS_PER_TOKEN = 4
 CONTEXT_TOKEN_BUDGET = 2000
 ASSIGNMENT_TOKEN_BUDGET = 1500
 
-SYSTEM_PROMPT = """You are a student completing an academic assignment as part of an AI benchmarking study. \
-Your goal is to produce a well-reasoned, academically appropriate response based on the course context \
-and assignment instructions provided. Follow the rubric criteria if provided. \
-Write in a clear, academic style appropriate for undergraduate coursework."""
+SYSTEM_PROMPT = """You are a graduate student completing an assignment for an MBA course on AI in business.
+
+Write in a genuine student voice — thoughtful and engaged, but not overly polished or corporate-sounding. \
+Use first person naturally. Show your own reasoning process, including occasional hedges like "I think," \
+"it seems like," or "from what I understand." Reference personal or work experience where it fits naturally. \
+Vary your sentence length — mix short punchy sentences with longer ones. Avoid bullet-point overload; \
+prefer flowing paragraphs. Don't use overly formal academic language unless the rubric specifically requires it. \
+Aim to sound like someone who genuinely finds the topic interesting but is still working through the ideas, \
+not like a consultant writing a report.
+
+Follow all rubric criteria and submission format instructions."""
 
 
 def _truncate(text, token_budget):
@@ -62,8 +70,16 @@ def build_assignment_prompt(course_id, assignment_id, run_id):
         raise ValueError(f"Assignment {assignment_id} not found in {assignments_path}")
 
     # Build context block
-    syllabus_block = _truncate(context.get("syllabus_text", ""), CONTEXT_TOKEN_BUDGET)
     course_name = context.get("course_name", f"Course {course_id}")
+    syllabus_text = context.get("syllabus_text", "")
+
+    # Supplement sparse syllabus with module names (shows course structure)
+    modules = context.get("modules", [])
+    if modules and len(syllabus_text) < 500:
+        module_lines = [f"- {m['name']}" for m in modules if m.get("name")]
+        syllabus_text += "\n\nCourse Modules:\n" + "\n".join(module_lines)
+
+    syllabus_block = _truncate(syllabus_text, CONTEXT_TOKEN_BUDGET)
 
     # Build assignment block
     desc_block = _truncate(assignment.get("description", ""), ASSIGNMENT_TOKEN_BUDGET // 2)
@@ -209,15 +225,119 @@ For short answer or essay, write your answer after the Q#: prefix."""
     return result
 
 
+EXCEL_SYSTEM_PROMPT = """You are a Python data analyst completing a university Excel assignment.
+Produce exactly TWO sections:
+
+SECTION 1 — Python code that:
+- Reads the dataset from os.environ["DATASET_PATH"] using pandas
+- Performs the required analyses concisely (no decorative formatting, just correct results)
+- Writes the Excel workbook to os.environ["EXCEL_OUTPUT_PATH"] using openpyxl
+- Creates the required tabs with clear headers
+- Keeps code tight and functional — avoid loops over every cell, use pandas + openpyxl efficiently
+
+SECTION 2 — Written reflection answering each reflection question (100-200 words each).
+
+Output format (follow exactly, no deviations):
+```python
+import os, pandas as pd
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+# concise code here
+```
+
+---REFLECTION---
+[Reflection answers here]"""
+
+
+def build_excel_prompt(course_id: int, assignment_id: int, run_id: str, dataset_path: str | None = None) -> dict:
+    """
+    Build a prompt for an Excel-deliverable assignment.
+    The LLM is asked to generate Python/openpyxl code + a written reflection.
+    """
+    assignments_path = f".tmp/assignments_{course_id}.json"
+    if not os.path.exists(assignments_path):
+        raise FileNotFoundError(f"Assignments not found: {assignments_path}")
+
+    with open(assignments_path) as f:
+        assignments = json.load(f)
+
+    assignment = next((a for a in assignments if a["id"] == assignment_id), None)
+    if not assignment:
+        raise ValueError(f"Assignment {assignment_id} not found")
+
+    desc_block = _truncate(assignment.get("description", ""), ASSIGNMENT_TOKEN_BUDGET)
+
+    rubric_lines = []
+    for r in assignment.get("rubric", []):
+        rubric_lines.append(f"- {r['description']} ({r['points']} pts): {r.get('long_description', '')}")
+    rubric_block = "\n".join(rubric_lines) if rubric_lines else "(No rubric provided)"
+
+    # Include a preview of the dataset
+    dataset_block = ""
+    if dataset_path and os.path.exists(dataset_path):
+        try:
+            import csv
+            with open(dataset_path, newline="") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            preview_rows = rows[:6]  # header + 5 rows
+            dataset_block = f"\nDATASET PREVIEW ({dataset_path.split('/')[-1]}):\n"
+            dataset_block += "\n".join([",".join(r) for r in preview_rows])
+            dataset_block += f"\n... ({len(rows) - 1} total data rows)\n"
+        except Exception as e:
+            dataset_block = f"\n(Dataset preview unavailable: {e})\n"
+    else:
+        dataset_block = "\n(Dataset will be loaded from DATASET_PATH environment variable at runtime)\n"
+
+    user_prompt = f"""ASSIGNMENT: {assignment['name']}
+POINTS: {assignment.get('points_possible', 'N/A')}
+
+INSTRUCTIONS:
+{desc_block}
+
+RUBRIC CRITERIA:
+{rubric_block}
+{dataset_block}
+The dataset file path will be available at runtime via os.environ["DATASET_PATH"].
+Write the Excel output to os.environ["EXCEL_OUTPUT_PATH"].
+
+Generate the Python code and reflection now."""
+
+    result = {
+        "run_id":         run_id,
+        "course_id":      course_id,
+        "assignment_id":  assignment_id,
+        "assignment_name": assignment["name"],
+        "submission_type": "automatable_excel",
+        "system_prompt":  EXCEL_SYSTEM_PROMPT,
+        "user_prompt":    user_prompt,
+        "dataset_path":   dataset_path or "",
+        "estimated_input_tokens": len(EXCEL_SYSTEM_PROMPT + user_prompt) // CHARS_PER_TOKEN,
+    }
+
+    out_dir = f".tmp/prompts_{run_id}"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = f"{out_dir}/{assignment_id}.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[build_prompt] Excel prompt for {assignment_id} → {out_path}")
+    return result
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build LLM prompt for an assignment or quiz")
     parser.add_argument("--course-id", type=int, required=True)
     parser.add_argument("--assignment-id", type=int)
     parser.add_argument("--quiz-id", type=int)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--excel", action="store_true", help="Build Excel code-gen prompt")
+    parser.add_argument("--dataset-path", default=None, help="Path to dataset CSV for Excel prompt")
     args = parser.parse_args()
 
-    if args.assignment_id:
+    if args.assignment_id and args.excel:
+        build_excel_prompt(args.course_id, args.assignment_id, args.run_id, args.dataset_path)
+    elif args.assignment_id:
         build_assignment_prompt(args.course_id, args.assignment_id, args.run_id)
     elif args.quiz_id:
         build_quiz_prompt(args.course_id, args.quiz_id, args.run_id)

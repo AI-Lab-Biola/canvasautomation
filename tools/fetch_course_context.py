@@ -40,36 +40,46 @@ def fetch_course_context(course_id):
     syllabus_raw = course_data.get("syllabus_body") or ""
     syllabus_text = strip_html(syllabus_raw)[:SYLLABUS_CHAR_LIMIT]
 
-    # Pages
+    # Pages (some courses disable this endpoint — handle gracefully)
     print(f"[fetch_course_context] Fetching pages...")
-    pages_raw = client.get_all(f"/courses/{course_id}/pages")
     pages = []
-    for p in pages_raw:
-        page_detail = client.get(f"/courses/{course_id}/pages/{p['url']}")
-        body_text = strip_html(page_detail.get("body") or "")[:PAGE_BODY_CHAR_LIMIT]
-        pages.append({
-            "title": p.get("title", ""),
-            "url": p.get("url", ""),
-            "body": body_text,
-        })
+    try:
+        pages_raw = client.get_all(f"/courses/{course_id}/pages")
+        for p in pages_raw:
+            try:
+                page_detail = client.get(f"/courses/{course_id}/pages/{p['url']}")
+                body_text = strip_html(page_detail.get("body") or "")[:PAGE_BODY_CHAR_LIMIT]
+                pages.append({
+                    "title": p.get("title", ""),
+                    "url": p.get("url", ""),
+                    "body": body_text,
+                })
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[fetch_course_context] Pages unavailable ({e}) — skipping.")
 
     # Modules
     print(f"[fetch_course_context] Fetching modules...")
-    modules_raw = client.get_all(
-        f"/courses/{course_id}/modules",
-        params={"include[]": "items"},
-    )
-    modules = [
-        {
-            "id": m["id"],
-            "name": m.get("name", ""),
-            "items": [
-                {"title": i.get("title", ""), "type": i.get("type", "")}
-                for i in m.get("items", [])
-            ],
-        }
-        for m in modules_raw
-    ]
+    modules = []
+    try:
+        modules_raw = client.get_all(
+            f"/courses/{course_id}/modules",
+            params={"include[]": "items"},
+        )
+        modules = [
+            {
+                "id": m["id"],
+                "name": m.get("name", ""),
+                "items": [
+                    {"title": i.get("title", ""), "type": i.get("type", "")}
+                    for i in m.get("items", [])
+                ],
+            }
+            for m in modules_raw
+        ]
+    except Exception as e:
+        print(f"[fetch_course_context] Modules unavailable ({e}) — skipping.")
 
     context = {
         "course_id": course_id,

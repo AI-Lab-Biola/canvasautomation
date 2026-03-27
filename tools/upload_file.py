@@ -19,12 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from tools.canvas_client import CanvasClient
 
 CONTENT_TYPE_MAP = {
-    ".pdf": "application/pdf",
+    ".pdf":  "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".txt": "text/plain",
-    ".md": "text/markdown",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt":  "text/plain",
+    ".md":   "text/markdown",
     ".html": "text/html",
-    ".py": "text/x-python",
+    ".py":   "text/x-python",
+    ".csv":  "text/csv",
 }
 
 
@@ -68,7 +70,7 @@ def upload_file(client, course_id, assignment_id, file_path):
     form_data["file"] = (file_name, file_data, content_type)
 
     import requests
-    resp = requests.post(upload_url, files=form_data)
+    resp = requests.post(upload_url, files=form_data, timeout=120)
 
     if resp.status_code not in (200, 201, 301, 302, 303):
         raise RuntimeError(f"S3 upload failed {resp.status_code}: {resp.text[:300]}")
@@ -90,10 +92,133 @@ def upload_file(client, course_id, assignment_id, file_path):
 
 
 def save_response_as_file(response_text, assignment_id, run_id):
-    """Save LLM response text to a .txt file for upload."""
-    out_dir = f".tmp/responses_{run_id}"
-    os.makedirs(out_dir, exist_ok=True)
-    file_path = f"{out_dir}/{assignment_id}_submission.txt"
-    with open(file_path, "w") as f:
-        f.write(response_text)
-    return file_path
+    """Save LLM response text as a formatted Word document (.docx)."""
+    return save_response_as_docx(response_text, assignment_id, run_id)
+
+
+def save_response_as_docx(response_text, assignment_id, run_id, title=None):
+    """
+    Convert LLM response (markdown-ish text) into a properly formatted .docx file.
+    Styling: Calibri 11pt body, student-appropriate margins, headings for ## lines.
+    """
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        import re
+
+        doc = Document()
+
+        # ── Page margins (1 inch all around — standard student paper) ──────────
+        for section in doc.sections:
+            section.top_margin    = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin   = Inches(1)
+            section.right_margin  = Inches(1)
+
+        # ── Default style: Calibri 11pt ────────────────────────────────────────
+        style = doc.styles["Normal"]
+        font  = style.font
+        font.name = "Calibri"
+        font.size = Pt(11)
+
+        # ── Title ──────────────────────────────────────────────────────────────
+        if title:
+            t = doc.add_heading(title, level=1)
+            t.runs[0].font.color.rgb = RGBColor(0x1F, 0x39, 0x64)  # dark navy
+
+        # ── Parse and render lines ─────────────────────────────────────────────
+        lines = response_text.strip().splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Heading 2 (##)
+            if line.startswith("## "):
+                h = doc.add_heading(line[3:].strip(), level=2)
+                h.runs[0].font.size = Pt(13)
+                i += 1
+                continue
+
+            # Heading 3 (###)
+            if line.startswith("### "):
+                h = doc.add_heading(line[4:].strip(), level=3)
+                h.runs[0].font.size = Pt(12)
+                i += 1
+                continue
+
+            # Heading 1 (#)
+            if re.match(r"^# [^#]", line):
+                h = doc.add_heading(line[2:].strip(), level=1)
+                i += 1
+                continue
+
+            # Horizontal rule (--- or ***)
+            if re.match(r"^[-\*]{3,}$", line.strip()):
+                doc.add_paragraph("─" * 60)
+                i += 1
+                continue
+
+            # Bullet list item
+            if re.match(r"^[\-\*\•] ", line):
+                text = line[2:].strip()
+                p = doc.add_paragraph(style="List Bullet")
+                _add_inline_formatting(p, text)
+                i += 1
+                continue
+
+            # Numbered list item
+            if re.match(r"^\d+\. ", line):
+                text = re.sub(r"^\d+\. ", "", line).strip()
+                p = doc.add_paragraph(style="List Number")
+                _add_inline_formatting(p, text)
+                i += 1
+                continue
+
+            # Empty line → paragraph break
+            if line.strip() == "":
+                i += 1
+                continue
+
+            # Normal paragraph — collect consecutive non-blank lines
+            para_lines = []
+            while i < len(lines) and lines[i].strip() != "" and not lines[i].startswith("#") and not re.match(r"^[\-\*\•\d]", lines[i]):
+                para_lines.append(lines[i])
+                i += 1
+            if para_lines:
+                p = doc.add_paragraph()
+                _add_inline_formatting(p, " ".join(para_lines))
+
+        out_dir   = f".tmp/responses_{run_id}"
+        os.makedirs(out_dir, exist_ok=True)
+        file_path = f"{out_dir}/{assignment_id}_submission.docx"
+        doc.save(file_path)
+        print(f"[upload_file] Saved Word document → {file_path}")
+        return file_path
+
+    except ImportError:
+        # python-docx not installed — fall back to .txt
+        print("[upload_file] Warning: python-docx not installed, falling back to .txt")
+        out_dir   = f".tmp/responses_{run_id}"
+        os.makedirs(out_dir, exist_ok=True)
+        file_path = f"{out_dir}/{assignment_id}_submission.txt"
+        with open(file_path, "w") as f:
+            f.write(response_text)
+        return file_path
+
+
+def _add_inline_formatting(paragraph, text):
+    """Add a run to paragraph with **bold** and *italic* markdown parsed."""
+    import re
+    # Split on **bold** and *italic* markers
+    pattern = re.compile(r"(\*\*[^*]+\*\*|\*[^*]+\*)")
+    parts   = pattern.split(text)
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            run       = paragraph.add_run(part[2:-2])
+            run.bold  = True
+        elif part.startswith("*") and part.endswith("*"):
+            run        = paragraph.add_run(part[1:-1])
+            run.italic = True
+        else:
+            paragraph.add_run(part)
